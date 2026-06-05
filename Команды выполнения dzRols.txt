@@ -1,0 +1,237 @@
+
+
+
+
+mkdir dzrols
+	cd ~/dzrols
+vagrant init  ubuntu/jammy64
+	nano Vagrantfile
+vagrant up
+vagrant ssh-config
+	ansible all -m ping -i '192.168.56.15,' --user vagrant --private-key /home/panda/dzrols/.vagrant/machines/default/virtualbox/private_key
+	
+mkdir -p ~/drupal-ansible
+cd ~/drupal-ansible
+mkdir group_vars
+touch inventory.ini playbook.yml requirements.yml
+	nano inventory.ini
+		[web]
+		192.168.56.15 ansible_user=vagrant ansible_ssh_private_key_file=/home/panda/dzrols/.vagrant/machines/default/virtualbox/private_key
+ansible all -i inventory.ini -m ping
+	cat > requirements.yml <<EOF
+		roles:
+		  - geerlingguy.nginx
+		  - geerlingguy.postgresql
+		  - geerlingguy.php
+		  - geerlingguy.drupal
+		EOF
+				
+ansible-galaxy install -r requirements.yml
+
+nano group_vars/all.yml
+		drupal_domain: drupal.local
+		drupal_core_path: /var/www/drupal
+
+		postgresql_databases:
+
+		- name: drupal
+
+		postgresql_users:
+
+		- name: drupal
+		  password: drupalpass
+
+		drupal_db_name: drupal
+		drupal_db_user: drupal
+		drupal_db_password: drupalpass
+		drupal_db_host: localhost
+
+		php_packages:
+
+		- php
+		- php-cli
+		- php-fpm
+		- php-pgsql
+		- php-gd
+		- php-xml
+		- php-mbstring
+		- php-curl
+nano playbook.yml
+- name: dzRols
+  hosts: all
+  become: yes
+
+  vars:
+    drupal_root: /var/www/drupal
+    drupal_db: drupal
+    drupal_user: drupal
+    drupal_pass: drupalpass
+
+  tasks:
+
+  # ---------------- SYSTEM ----------------
+  - name: Install required packages
+    apt:
+      name:
+        - nginx
+        - postgresql
+        - php8.1-fpm
+        - php8.1-pgsql
+        - php8.1-xml
+        - php8.1-mbstring
+        - php8.1-gd
+        - php8.1-curl
+        - unzip
+        - wget
+      update_cache: yes
+
+  - name: Start services
+    service:
+      name: "{{ item }}"
+      state: started
+      enabled: yes
+    loop:
+      - nginx
+      - postgresql
+      - php8.1-fpm
+
+  # ---------------- POSTGRES ----------------
+  - name: Create database
+    become_user: postgres
+    postgresql_db:
+      name: "{{ drupal_db }}"
+
+  - name: Create user
+    become_user: postgres
+    postgresql_user:
+      name: "{{ drupal_user }}"
+      password: "{{ drupal_pass }}"
+
+  - name: Grant privileges
+    become_user: postgres
+    postgresql_privs:
+      db: "{{ drupal_db }}"
+      role: "{{ drupal_user }}"
+      type: database
+      privs: ALL
+
+  # ---------------- DRUPAL ----------------
+  - name: Download Drupal
+    get_url:
+      url: "https://ftp.drupal.org/files/projects/drupal-9.5.11.tar.gz"
+      dest: /tmp/drupal.tar.gz
+
+  - name: Extract Drupal
+    unarchive:
+      src: /tmp/drupal.tar.gz
+      dest: /tmp/
+      remote_src: yes
+
+  - name: Find extracted folder
+    find:
+      paths: /tmp
+      patterns: "drupal-*"
+      file_type: directory
+    register: drupal_src
+
+  - name: Clean web root
+    file:
+      path: "{{ drupal_root }}"
+      state: absent
+
+  - name: Create web root
+    file:
+      path: "{{ drupal_root }}"
+      state: directory
+      owner: www-data
+      group: www-data
+      mode: "0755"
+
+  - name: Copy Drupal files
+    copy:
+      src: "{{ drupal_src.files[0].path }}/"
+      dest: "{{ drupal_root }}/"
+      remote_src: yes
+
+  - name: Set permissions
+    file:
+      path: "{{ drupal_root }}"
+      state: directory
+      recurse: yes
+      owner: www-data
+      group: www-data
+
+  # ---------------- NGINX ----------------
+  - name: Configure nginx vhost
+    copy:
+      dest: /etc/nginx/sites-available/drupal
+      content: |
+        server {
+            listen 80;
+            server_name _;
+            root {{ drupal_root }};
+
+            index index.php index.html;
+
+            location / {
+                try_files $uri /index.php?$query_string;
+            }
+
+            location ~ \.php$ {
+                include snippets/fastcgi-php.conf;
+                fastcgi_pass unix:/run/php/php8.1-fpm.sock;
+            }
+        }
+
+  - name: Enable site
+    file:
+      src: /etc/nginx/sites-available/drupal
+      dest: /etc/nginx/sites-enabled/drupal
+      state: link
+
+  - name: Remove default nginx site
+    file:
+      path: /etc/nginx/sites-enabled/default
+      state: absent
+
+  - name: Restart nginx
+    service:
+      name: nginx
+      state: restarted
+
+  # ---------------- DRUPAL SETTINGS ----------------
+  - name: Create settings.php
+    copy:
+      dest: "{{ drupal_root }}/sites/default/settings.php"
+      content: |
+        <?php
+        $databases['default']['default'] = [
+          'database' => '{{ drupal_db }}',
+          'username' => '{{ drupal_user }}',
+          'password' => '{{ drupal_pass }}',
+          'host' => 'localhost',
+          'driver' => 'pgsql',
+        ];	  
+
+		
+ansible-playbook -i inventory.ini playbook.yml | tee install.log
+
+cd dzrols/
+vagrant ssh
+	sudo systemctl status nginx
+	sudo systemctl status postgresql
+	sudo systemctl status php8.1-fpm
+exit
+sudo nano /etc/hosts
+	добавлена строка 
+		192.168.56.15 drupal.local
+		
+mkdir templates
+nano templates/settings.php.j2
+	$databases['default']['default'] = [
+   'database' => 'drupal',
+   'username' => '{{ drupal_db_user }}',
+   'password' => '{{ drupal_db_password }}',
+   'host' => 'localhost',
+   'driver' => 'pgsql',
+	];
